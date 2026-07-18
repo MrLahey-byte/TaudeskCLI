@@ -1,0 +1,14 @@
+{
+  "keybinds": {
+    "pane_switch": "ctrl+shift+]",
+    "pane_switch_reverse": "ctrl+shift+[",
+    "terminal_toggle": "ctrl+`"
+  },
+  "verify": {
+    "commands": [
+      { "name": "typecheck", "command": "bun turbo typecheck --continue", "timeout_ms": 120000 },
+      { "name": "tests", "command": ["bun", "test", "test/taudesk"], "timeout_ms": 60000 }
+    ]
+  },
+  "contextMode": "auto"
+}

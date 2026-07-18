@@ -29,20 +29,21 @@ export function redactText(text: string): string {
 
 export function redactValue<T>(value: T): T {
   if (typeof value === "string") {
-    return redactText(value) as unknown as T;
+    return redactText(value) as T;
   }
   if (Array.isArray(value)) {
-    return (value.map((v) => redactValue(v)) as unknown) as T;
+    const mapped = (value as unknown[]).map((item) => redactValue(item as T));
+    return mapped as unknown as T;
   }
   if (value !== null && typeof value === "object") {
-    // plain objects only — don't traverse class instances arbitrarily
-    const proto = Object.getPrototypeOf(value);
+    const objectValue = value as Record<string, unknown>;
+    const proto = Object.getPrototypeOf(objectValue);
     if (proto !== Object.prototype && proto !== null) return value;
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      out[k] = redactValue(v);
+    const output: Record<string, unknown> = {};
+    for (const [key, nested] of Object.entries(objectValue)) {
+      output[key] = redactValue(nested as T);
     }
-    return out as T;
+    return output as T;
   }
   return value;
 }

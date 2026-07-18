@@ -1,5 +1,5 @@
-// runner.ts — verify runner. I/O allowlist: owns Bun.spawn pipe, publish redacted output.
-// Cwd containment: resolve + reject escape same rule as config.
+// runner.ts — verify runner. I/O allowlist owns Bun.spawn pipe, publishes redacted output.
+// Cwd containment: resolve + reject escape same rule as config. Fail-closed for traversal.
 
 import { redactText } from "./redact.ts";
 import path from "node:path";
@@ -25,27 +25,51 @@ export type RunnerBus = {
   publish: (topic: string, data: unknown) => void;
 };
 
+function rejectAbsolutePath(requested: string): boolean {
+  const normalized = requested.replace(/\\/g, "/");
+  return normalized.startsWith("/") || /^[a-zA-Z]:\//.test(normalized);
+}
+
+function hasTraversalSegment(requested: string): boolean {
+  return requested.replace(/\\/g, "/").split("/").includes("..");
+}
+
 function resolveAndContain(base: string, requested: string | undefined, resolve: (...p: string[]) => string): string {
   if (!requested) return base;
-  // reject absolute and .. traversal
-  const normalized = requested.replace(/\\/g, "/");
-  if (normalized.startsWith("/") || /^[a-zA-Z]:\//.test(normalized)) {
-    throw new Error(`absolute cwd not allowed: ${requested}`);
-  }
-  if (normalized.split("/").includes("..")) {
-    throw new Error(`traversal cwd not allowed: ${requested}`);
-  }
+  if (rejectAbsolutePath(requested)) throw new Error(`absolute cwd not allowed: ${requested}`);
+  if (hasTraversalSegment(requested)) throw new Error(`traversal cwd not allowed: ${requested}`);
+
   const joined = resolve(base, requested);
   const baseResolved = resolve(base);
-  // containment check: joined must start with baseResolved
-  const rel = path.relative(baseResolved, joined);
-  if (rel.startsWith("..") || path.isAbsolute(rel) && rel !== "") {
-    // Alternative check using string prefix for win32
-    if (!joined.startsWith(baseResolved)) {
-      throw new Error(`cwd escapes base: ${requested}`);
-    }
+  const relative = path.relative(baseResolved, joined);
+
+  if (relative.startsWith("..") && !joined.startsWith(baseResolved)) {
+    throw new Error(`cwd escapes base: ${requested}`);
   }
   return joined;
+}
+
+type ByteSource = ReadableStream<Uint8Array> | { getReader(): { read(): Promise<{ value?: Uint8Array; done: boolean }> } };
+
+async function drainToOutput(
+  source: ByteSource,
+  decode: (chunk: Uint8Array, flush?: boolean) => string,
+  onChunk: (redactedChunk: string) => void,
+  outputRef: { text: string },
+): Promise<void> {
+  const reader = source instanceof ReadableStream ? source.getReader() : source.getReader();
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    const raw = decode(value as Uint8Array);
+    const redacted = redactText(raw);
+    if (outputRef.text.length < 200 * 1024) {
+      outputRef.text += redacted.slice(0, 200 * 1024 - outputRef.text.length);
+    }
+    onChunk(redacted);
+  }
 }
 
 export async function runVerifyCommand(
@@ -53,98 +77,55 @@ export async function runVerifyCommand(
   opts: { baseDir: string; bus?: RunnerBus; io: RunnerIo },
 ): Promise<{ exitCode: number; output: string }> {
   const cwd = resolveAndContain(opts.baseDir, cmd.cwd, opts.io.resolve);
-  const command = typeof cmd.command === "string" ? [cmd.command] : cmd.command;
+  const commands = typeof cmd.command === "string" ? [cmd.command] : cmd.command;
   const timeoutMs = cmd.timeout_ms ?? 60000;
-  const OUTPUT_CAP = 200 * 1024; // 200KiB
 
-  opts.bus?.publish("verify", { kind: "started", name: cmd.name, command });
+  opts.bus?.publish("verify", { kind: "started", name: cmd.name, command: commands });
 
-  let output = "";
+  const outputRef = { text: "" };
   let exitCode = 0;
 
   try {
-    // Real spawn path — uses injected io
-    // For Bun, cmd[0] is shell? We support string command via shell -c fallback
-    const spawnOpts = Array.isArray(cmd.command)
-      ? { cmd: command as string[], cwd, timeoutMs }
-      : { cmd: ["/bin/sh", "-c", command[0]] as string[], cwd, timeoutMs };
-
-    // If Bun is available, use its shape; else fallback already wrapped in io
-    const proc = opts.io.spawn({
-      cmd: spawnOpts.cmd,
-      cwd: spawnOpts.cwd,
-      timeoutMs: spawnOpts.timeoutMs,
-    });
-
+    const spawnCommand = Array.isArray(cmd.command) ? (commands as string[]) : ["/bin/sh", "-c", commands[0]];
+    const proc = opts.io.spawn({ cmd: spawnCommand, cwd, timeoutMs });
     const decoder = new TextDecoder();
 
-    async function readStream(
-      stream: ReadableStream<Uint8Array> | { getReader(): { read(): Promise<{ value?: Uint8Array; done: boolean }> } },
-    ) {
-      // Handle both web streams and custom
-      if (stream instanceof ReadableStream) {
-        const reader = stream.getReader();
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          if (value) {
-            let chunk = decoder.decode(value, { stream: true });
-            // redact at publish per T4
-            chunk = redactText(chunk);
-            if (output.length < OUTPUT_CAP) {
-              const remaining = OUTPUT_CAP - output.length;
-              output += chunk.slice(0, remaining);
-            }
-            opts.bus?.publish("verify", { kind: "output", name: cmd.name, chunk });
-          }
-        }
-      } else {
-        const reader = stream.getReader();
-        while (true) {
-          const res = await reader.read();
-          if (res.done) break;
-          if (res.value) {
-            let chunk = decoder.decode(res.value as Uint8Array, { stream: true });
-            chunk = redactText(chunk);
-            if (output.length < OUTPUT_CAP) {
-              output += chunk.slice(0, OUTPUT_CAP - output.length);
-            }
-            opts.bus?.publish("verify", { kind: "output", name: cmd.name, chunk });
-          }
-        }
-      }
+    function publishOutputChunk(chunk: string) {
+      opts.bus?.publish("verify", { kind: "output", name: cmd.name, chunk });
     }
 
-    const outP = readStream(proc.stdout as never);
-    const errP = readStream(proc.stderr as never);
+    const outTask = drainToOutput(proc.stdout, (b) => decoder.decode(b, { stream: true }), publishOutputChunk, outputRef);
+    const errTask = drainToOutput(proc.stderr, (b) => decoder.decode(b, { stream: true }), publishOutputChunk, outputRef);
 
-    // timeout race
-    const timeoutPromise = new Promise<number>((_, rej) => {
+    const timeout = new Promise<number>((_, reject) => {
       setTimeout(() => {
         try {
           proc.kill();
-        } catch {}
-        rej(new Error(`timeout ${timeoutMs}ms`));
+        } catch (error) {
+          // Why swallow kill failure: proc may already be dead; timeout path still needs to reject to trigger fallback exit code 124
+          void error;
+        }
+        reject(new Error(`timeout ${timeoutMs}ms`));
       }, timeoutMs);
     });
 
-    const exitPromise = proc.exited;
-
     try {
-      exitCode = await Promise.race([exitPromise, timeoutPromise] as Promise<number>[]);
-    } catch {
+      exitCode = await Promise.race([proc.exited, timeout]);
+    } catch (timeoutError) {
+      // Why 124: conventional timeout exit code, distinguishes from spawn failure (1) per B3 runner spec
+      void timeoutError;
       exitCode = 124;
-      output += `\n[timeout after ${timeoutMs}ms]`;
+      outputRef.text += `\n[timeout after ${timeoutMs}ms]`;
     }
 
-    await Promise.allSettled([outP, errP]);
+    await Promise.allSettled([outTask, errTask]);
 
     opts.bus?.publish("verify", { kind: "exited", name: cmd.name, exitCode });
-    return { exitCode, output };
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    const redacted = redactText(msg);
+    return { exitCode, output: outputRef.text };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const redacted = redactText(message);
     opts.bus?.publish("verify", { kind: "exited", name: cmd.name, exitCode: 1, error: redacted });
-    return { exitCode: 1, output: output + `\n${redacted}` };
+    return { exitCode: 1, output: `${outputRef.text}\n${redacted}` };
   }
 }

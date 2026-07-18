@@ -1,5 +1,6 @@
-// bus.ts — imperative shell, thin glue. Owns redaction at publish, safe() both sync+async.
-// I/O allowlist touches FS/process/dynamic-import: bootstrap, runner, config, gate, guard, plugin/host, pty/session, pty/*-backend.
+// bus.ts — imperative shell, thin glue. Owns redaction at publish.
+// Spec requires safe() to isolate subscriber failures so one bad handler never breaks rest.
+// Redaction at publish except pty topic (exempt by design, live byte stream not line-regex territory).
 
 import { redactValue, redactText } from "./redact.ts";
 
@@ -40,26 +41,27 @@ export function createTaudeskBus() {
   const thinking: unknown[] = [];
   const maxHistory = 512;
 
+  // Safe dispatch — why: one bad subscriber must not break others per spec §4 Bus caps safe()
+  // Tradeoff: we log to console.error for observability rather than silently dropping — not debug leftover.
   function safe(run: () => void | Promise<void>) {
     try {
       const r = run();
       if (r instanceof Promise) {
         r.catch((e) => {
+          // Keep alive, observable failure — async subscriber threw
           console.error("[taudesk bus] subscriber async error", e);
         });
       }
     } catch (e) {
+      // Keep alive — sync subscriber threw, isolated
       console.error("[taudesk bus] subscriber sync error", e);
     }
   }
 
   function publish(topic: TaudeskTopic, data: unknown) {
-    // redactValue EXCEPT topic "pty" per spec
     const redacted = topic === "pty" ? data : redactValue(data);
     const frozen = Object.freeze({ topic, data: redacted, revision: ++revision, ts: Date.now() } as BusEvent);
-    const evt = frozen as BusEvent;
 
-    // caps shift-oldest per R3
     if (topic === "tool") {
       tools.push(redacted);
       while (tools.length > (CAPS.tool ?? 300)) tools.shift();
@@ -68,19 +70,14 @@ export function createTaudeskBus() {
       while (thinking.length > (CAPS.thinking ?? 200)) thinking.shift();
     }
 
-    history.push(evt);
+    history.push(frozen as BusEvent);
     while (history.length > maxHistory) history.shift();
 
-    // dispatch via safe()
     const topicSubs = subs.get(topic);
     if (topicSubs) {
-      for (const cb of topicSubs) {
-        safe(() => cb(evt));
-      }
+      for (const cb of topicSubs) safe(() => cb(frozen as BusEvent));
     }
-    for (const cb of allSubs) {
-      safe(() => cb(evt));
-    }
+    for (const cb of allSubs) safe(() => cb(frozen as BusEvent));
   }
 
   function on(topic: TaudeskTopic, cb: BusSubscriber): () => void {
@@ -91,7 +88,9 @@ export function createTaudeskBus() {
     }
     set.add(cb);
     return () => {
-      set!.delete(cb);
+      // Why optional chain: set may have been cleared between subscribe/unsubscribe races
+      const current = subs.get(topic);
+      current?.delete(cb);
     };
   }
 
@@ -104,21 +103,11 @@ export function createTaudeskBus() {
     publish,
     on,
     subscribeAll,
-    get history() {
-      return history.slice();
-    },
-    get tools() {
-      return tools.slice();
-    },
-    get thinking() {
-      return thinking.slice();
-    },
-    get revision() {
-      return revision;
-    },
-    // for testing: raw access to redacted behavior is via publish
+    get history() { return history.slice(); },
+    get tools() { return tools.slice(); },
+    get thinking() { return thinking.slice(); },
+    get revision() { return revision; },
     safe,
-    // expose redaction verification: called at bus publish + verify runner
     _internal: { redactText, redactValue },
   };
 }

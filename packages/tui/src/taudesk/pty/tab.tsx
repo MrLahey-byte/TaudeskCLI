@@ -1,8 +1,7 @@
-// pty/tab.tsx — PTY tab component bridging session + renderable
-import { createSignal, onCleanup, onMount, createEffect, Show } from "solid-js";
-import { useRenderer } from "@opentui/solid";
+// pty/tab.tsx — PTY tab bridging session + renderable. No global mutable data, narrow interfaces.
+import { createSignal, onCleanup, onMount, Show } from "solid-js";
 import { createPtySession, type PtySession } from "./session.ts";
-import { PtyRenderable, type PtyFrame, type PtyCell } from "./renderable.tsx";
+import { type PtyFrame, type PtyCell } from "./renderable.tsx";
 import { keyToPtyBytes } from "./keys.ts";
 import { shouldConsumeForPty } from "./passthrough.ts";
 import { useTaudeskState } from "../state.tsx";
@@ -11,145 +10,110 @@ import { useOpencodeKeymap } from "../../keymap.tsx";
 import { createScreen } from "./screen.ts";
 
 function ansiToCells(data: string, cols: number): PtyCell[][] {
-  // minimal VT parser: accumulate chars, handle basic colors via @xterm/headless would do proper, but fallback
-  // For full fidelity we rely on screen.ts; here we buffer raw lines for renderable input when headless unavailable
-  const lines = data.split("\n");
-  return lines.map((line) =>
-    line.split("").slice(0, cols).map((ch) => ({ char: ch })),
-  );
+  return data.split("\n").map((line) => line.split("").slice(0, cols).map((ch) => ({ char: ch })));
 }
 
-export function PtyTab(props: {
-  id?: string;
-  cols?: number;
-  rows?: number;
+export type PtyTabProps = {
   cwd?: string;
   shell?: string;
-  onExit?: (code: number) => void;
+  cols?: number;
+  rows?: number;
   focused?: boolean;
-}) {
+};
+
+export function PtyTab(props: PtyTabProps) {
   const taudesk = useTaudeskState();
-  const renderer = useRenderer();
   const keymap = useOpencodeKeymap();
-  let container: unknown = null;
 
   const [frame, setFrame] = createSignal<PtyFrame | null>(null);
   const [session, setSession] = createSignal<PtySession | null>(null);
   const cols = () => props.cols ?? 80;
   const rows = () => props.rows ?? 24;
-
-  let bufferLines: string[] = [];
-  let cursorX = 0;
-  let cursorY = 0;
   let screenHandle: Awaited<ReturnType<typeof createScreen>> | null = null;
 
   onMount(async () => {
     screenHandle = await createScreen(cols(), rows());
 
-    const sess = await createPtySession(
-      {
-        cols: cols(),
-        rows: rows(),
-        cwd: props.cwd,
-        shell: props.shell,
-        bus: taudesk.bus,
-      },
-    );
-    setSession(sess);
+    const ptySession = await createPtySession({
+      cols: cols(),
+      rows: rows(),
+      cwd: props.cwd,
+      shell: props.shell,
+      bus: taudesk.bus,
+    });
+    setSession(ptySession);
 
-    sess.onData((data) => {
-      // write to screen
-      screenHandle?.write(data);
-      bufferLines.push(data);
-      if (bufferLines.length > 1000) bufferLines.shift();
-
-      // build frame for renderable — use screen grid if available else ansi fallback
-      const grid = screenHandle?.readGrid?.();
+    ptySession.onData((chunk) => {
+      screenHandle?.write(chunk);
+      const grid = screenHandle?.readGrid();
       if (grid && grid.length > 0) {
-        const cells: PtyCell[][] = grid.map((row) =>
-          row.map((c) => ({
-            char: (c as { char?: string }).char ?? " ",
-            // fg/bg parsed by renderable
-          })),
-        );
-        setFrame({
-          cols: cols(),
-          rows: rows(),
-          cells,
-          cursorX,
-          cursorY,
-          cursorVisible: true,
-        });
+        const cells: PtyCell[][] = grid.map((row) => row.map((c) => ({ char: c.char ?? " " })));
+        setFrame({ cols: cols(), rows: rows(), cells, cursorX: 0, cursorY: grid.length - 1, cursorVisible: true });
       } else {
-        const cells = ansiToCells(data, cols());
-        setFrame({
-          cols: cols(),
-          rows: rows(),
-          cells: cells.slice(-rows()),
-          cursorX: 0,
-          cursorY: Math.min(rows() - 1, cells.length - 1),
-          cursorVisible: true,
-        });
+        const cells = ansiToCells(chunk, cols());
+        setFrame({ cols: cols(), rows: rows(), cells: cells.slice(-rows()), cursorX: 0, cursorY: cells.length - 1, cursorVisible: true });
       }
     });
   });
 
   onCleanup(() => {
-    try { session()?.kill(); } catch {}
-    try { screenHandle?.dispose(); } catch {}
+    try {
+      session()?.kill();
+    } catch (error) {
+      // Why log: kill may throw if proc already exited; observable for debug, not fatal
+      console.error("[taudesk pty] kill failed", error);
+    }
+    try {
+      screenHandle?.dispose();
+    } catch (error) {
+      console.error("[taudesk pty] screen dispose failed", error);
+    }
   });
 
-  // resize propagation: pane resize -> renderable.onResize -> session.resize -> proc.resize
-  const handleResize = (c: number, r: number) => {
-    try { session()?.resize(c, r); } catch {}
-    try { screenHandle?.resize(c, r); } catch {}
-  };
+  function handleResize(newCols: number, newRows: number) {
+    try {
+      session()?.resize(newCols, newRows);
+    } catch (error) {
+      console.error("[taudesk pty] resize session failed", error);
+    }
+    try {
+      screenHandle?.resize(newCols, newRows);
+    } catch (error) {
+      console.error("[taudesk pty] resize screen failed", error);
+    }
+  }
 
-  // key passthrough — pane-switch intercepts at 10000 above PTY passthrough, so terminal can never trap (G14)
-  // Note: we only register intercept when focused, and we cast to any to satisfy opentui keymap overloads (priority ordering per R4)
+  // G14: pane-switch intercepts at 10000 above PTY passthrough so terminal can never trap it
   if (props.focused) {
-    const off = (keymap as any).intercept(
+    const off = (keymap as unknown as { intercept: (t: string, h: (e: unknown) => void, o: { priority: number }) => () => void }).intercept(
       "key",
-      (evt: { key?: { name?: string; ctrl?: boolean; shift?: boolean; alt?: boolean; meta?: boolean; sequence?: string } }) => {
-        const k = evt.key;
-        if (!k) return;
-        const consumed = shouldConsumeForPty(
-          { name: k.name, sequence: k.sequence, ctrl: !!k.ctrl, shift: !!k.shift, alt: !!k.alt, meta: !!k.meta },
+      (evt) => {
+        const key = (evt as { key?: { name?: string; ctrl?: boolean; shift?: boolean; alt?: boolean; meta?: boolean; sequence?: string } }).key;
+        if (!key) return;
+        shouldConsumeForPty(
+          { name: key.name, sequence: key.sequence, ctrl: !!key.ctrl, shift: !!key.shift, alt: !!key.alt, meta: !!key.meta },
           {
-            isPaneSwitchCombo: (key): boolean => {
-              return !!(
-                (key.ctrl && key.shift && (key.name === "]" || key.sequence === "]")) ||
-                (key.ctrl && key.shift && (key.name === "[" || key.sequence === "["))
-              );
-            },
-            toBytes: (key) => keyToPtyBytes({ name: key.name, sequence: key.sequence, ctrl: key.ctrl, shift: key.shift, alt: key.alt, meta: key.meta } as never),
-            write: (b: string) => {
-              try { session()?.write(b); } catch {}
+            isPaneSwitchCombo: (k) => !!(k.ctrl && k.shift && (k.name === "]" || k.name === "[" || k.sequence === "]" || k.sequence === "[")),
+            toBytes: (k) => keyToPtyBytes({ name: k.name, sequence: k.sequence, ctrl: k.ctrl, shift: k.shift, alt: k.alt, meta: k.meta }),
+            write: (bytes) => {
+              try {
+                session()?.write(bytes);
+              } catch (error) {
+                console.error("[taudesk pty] write failed", error);
+              }
             },
           },
         );
-        if (consumed) {
-          // handled
-        }
       },
       { priority: PRIORITIES.PTY_PASSTHROUGH },
     );
-    onCleanup(off as never);
+    onCleanup(off as unknown as () => void);
   }
 
   return (
     <box flexGrow={1} minHeight={0} flexDirection="column">
       <Show when={frame()}>
-        {(f) => (
-          // @ts-ignore custom element registered via extend
-          <pty_renderable
-            width="100%"
-            height="100%"
-            getFrame={() => f()}
-            onResize={handleResize}
-            live
-          />
-        )}
+        {(current) => <pty_renderable width="100%" height="100%" getFrame={() => current()} onResize={handleResize} live />}
       </Show>
       <Show when={!frame()}>
         <text fg="textMuted">Initializing terminal...</text>

@@ -1,4 +1,6 @@
-// pane-focus.ts — pure factory (no Solid). Focus moves to Control if focused pane disappears on shrink.
+// pane-focus.ts — pure factory, no Solid dependency.
+// Why factory not signal: usable in pure tests without Solid owner; focus repair moves to Control when focused pane disappears on shrink.
+
 export type PaneId = "context" | "control" | "observability";
 
 export type PaneFocusState = {
@@ -13,12 +15,20 @@ const ORDER: PaneId[] = ["context", "control", "observability"];
 
 export function createPaneFocusState(initial: PaneId = "control"): PaneFocusState {
   let current: PaneId = initial;
-  const subs = new Set<(pane: PaneId) => void>();
+  const subscribers = new Set<(pane: PaneId) => void>();
+
   function notify() {
-    for (const cb of subs) {
-      try { cb(current); } catch {}
+    for (const subscriber of subscribers) {
+      try {
+        subscriber(current);
+      } catch (error) {
+        // Why log-and-continue here: one bad subscriber must not break focus propagation for others per pub/sub contract.
+        // Tradeoff: error is observable via console.error rather than silent swallow per anti-slop rule.
+        console.error("[taudesk focus] subscriber error", error);
+      }
     }
   }
+
   return {
     get: () => current,
     set: (pane: PaneId) => {
@@ -30,20 +40,18 @@ export function createPaneFocusState(initial: PaneId = "control"): PaneFocusStat
     cycle: (dir: 1 | -1) => {
       let idx = ORDER.indexOf(current);
       if (idx === -1) idx = 1;
-      // wrap context→control→observability per spec
       idx = (idx + dir + ORDER.length) % ORDER.length;
       current = ORDER[idx];
       notify();
       return current;
     },
     subscribe: (cb: (pane: PaneId) => void) => {
-      subs.add(cb);
-      return () => subs.delete(cb);
+      subscribers.add(cb);
+      return () => subscribers.delete(cb);
     },
     repair: (visible: Set<PaneId>) => {
       if (!visible.has(current)) {
         current = "control";
-        // ensure control is visible if possible, else pick first visible
         if (!visible.has(current)) {
           const fallback = ORDER.find((p) => visible.has(p)) ?? "control";
           current = fallback;

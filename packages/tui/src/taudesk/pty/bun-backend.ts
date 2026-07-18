@@ -1,7 +1,22 @@
-// pty/bun-backend.ts — bun-pty wrapper. Lazy-loaded per B5. Covers signatures seen in 0.4.8.
+// pty/bun-backend.ts — bun-pty wrapper, lazily imported per B5.
+// Why lazy: non-PTY users never load native binding (perf budget).
+
+type BunPtySpawnOptions = {
+  cols: number;
+  rows: number;
+  cwd?: string;
+  shell?: string;
+  env?: Record<string, string>;
+};
+
+type BunPtyModuleShape = {
+  spawn?: (opts: BunPtySpawnOptions) => unknown;
+  default?: { spawn?: (opts: BunPtySpawnOptions) => unknown; Terminal?: { spawn?: (opts: BunPtySpawnOptions) => unknown } } & ((opts: BunPtySpawnOptions) => unknown);
+  Terminal?: { spawn?: (opts: BunPtySpawnOptions) => unknown };
+};
 
 export type BunPtyBackend = {
-  spawn: (opts: { cols: number; rows: number; cwd?: string; shell?: string; env?: Record<string, string> }) => any;
+  spawn: (opts: BunPtySpawnOptions) => unknown;
 };
 
 export type BunPtyProc = {
@@ -18,10 +33,13 @@ let cached: BunPtyBackend | null = null;
 export async function getBunPtyBackend(): Promise<BunPtyBackend | null> {
   if (cached) return cached;
   try {
-    const mod: any = await import("bun-pty");
-    const spawnFn = mod.spawn ?? mod.default?.spawn ?? mod.default ?? mod.Terminal?.spawn;
+    const moduleShape = (await import("bun-pty")) as BunPtyModuleShape;
+    const spawnFn =
+      moduleShape.spawn ?? moduleShape.default?.spawn ?? (moduleShape.default as unknown as (opts: BunPtySpawnOptions) => unknown) ?? moduleShape.Terminal?.spawn;
     if (!spawnFn) return null;
-    cached = { spawn: (opts: { cols: number; rows: number; cwd?: string; shell?: string; env?: Record<string, string> }) => spawnFn(opts) } as any;
+    cached = {
+      spawn: (opts) => (spawnFn as (opts: BunPtySpawnOptions) => unknown)(opts),
+    };
     return cached;
   } catch {
     return null;

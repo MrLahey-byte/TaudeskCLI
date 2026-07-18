@@ -1,23 +1,30 @@
-// views/identity.tsx — provider/model identity, reads existing sync via bus wiring
-import { createSignal, onCleanup, Show } from "solid-js";
+// views/identity.tsx — provider/model identity, reads via bus wiring (identity topic)
+import { createSignal, onCleanup } from "solid-js";
 import { useTaudeskState } from "../state.tsx";
-import { useTheme } from "../../context/theme.tsx";
+
+type IdentityPayload = {
+  model?: string;
+  provider?: string;
+  agent?: string;
+};
 
 export function IdentityView() {
-  const { theme } = useTheme();
   const state = useTaudeskState();
   const [model, setModel] = createSignal<string>("(none)");
   const [agent, setAgent] = createSignal<string>("(none)");
 
-  const off1 = state.bus.on("identity", (evt) => {
-    const d = evt.data as { model?: string; provider?: string; agent?: string; kind?: string } | undefined;
-    if (!d) return;
-    if (d.model || d.provider) {
-      setModel(`${d.provider ?? ""}/${d.model ?? ""}`.replace(/^\//, ""));
+  const off = state.bus.on("identity", (event) => {
+    const payload = event.data as IdentityPayload | undefined;
+    if (!payload) return;
+    if (payload.model || payload.provider) {
+      const provider = payload.provider ?? "";
+      const modelName = payload.model ?? "";
+      const combined = `${provider}/${modelName}`.replace(/^\//, "").replace(/\/$/, "");
+      setModel(combined || "(none)");
     }
-    if (d.agent) setAgent(d.agent);
+    if (payload.agent) setAgent(payload.agent);
   });
-  onCleanup(off1);
+  onCleanup(off);
 
   return (
     <box flexDirection="row" gap={1}>

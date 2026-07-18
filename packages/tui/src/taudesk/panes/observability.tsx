@@ -1,20 +1,26 @@
 // panes/observability.tsx — Observability pane (confirmations, diff, verify, switcher, PTY, tools)
+import type { JSX } from "solid-js";
 import { useTheme } from "../../context/theme.tsx";
 import { useTaudeskState } from "../state.tsx";
 import { PaneErrorBoundary } from "./fallback.tsx";
 
-export function ObservabilityPane(props: { focused: boolean; width: number; children?: unknown }) {
+type ObservabilityProps = {
+  focused: boolean;
+  width: number;
+  children?: JSX.Element;
+};
+
+export function ObservabilityPane(props: ObservabilityProps): JSX.Element {
   const { theme } = useTheme();
   const state = useTaudeskState();
-  const focused = () => props.focused || state.focus.get() === "observability";
-  const borderColor = () => (focused() ? theme.borderActive : theme.border);
+  const isFocused = () => props.focused || state.focus.get() === "observability";
 
   return (
     <box
       width={props.width}
       height="100%"
       borderStyle="rounded"
-      borderColor={borderColor()}
+      borderColor={isFocused() ? theme.borderActive : theme.border}
       flexDirection="column"
       title=" Observability "
       titleAlignment="left"
@@ -22,7 +28,7 @@ export function ObservabilityPane(props: { focused: boolean; width: number; chil
     >
       <PaneErrorBoundary pane="observability">
         <box flexGrow={1} flexDirection="column" paddingLeft={1} paddingRight={1} gap={1} overflow="hidden">
-          {props.children as never}
+          {props.children}
         </box>
       </PaneErrorBoundary>
     </box>

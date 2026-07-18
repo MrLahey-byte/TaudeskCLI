@@ -1,4 +1,31 @@
-# PLATFORM.md — execution evidence
+# PLATFORM.md — execution evidence — Linux CI via podman oven/bun:1.3.12 (real, not workflow file only per T9)
+
+Evidence captured: podman run docker.io/oven/bun:1.3.12 + apt-get git, bun install 2370 pkgs OK, typecheck PASS, taudesk 51/51 PASS, perf numeric budgets.
+
+```
+typecheck: $ tsgo --noEmit -> TC:True (0 errors, was 12)
+tests: 51 pass 0 fail 193 expect() calls Ran 51 tests across 20 files [4.64s] (was 40/11)
+perf: [perf] classify+redact+publish+dispatch 2000 median=11.0ms (budget 250ms) bun=1.3.12
+      [perf] mount seeded (geometry 1000x) 0.4ms budget 2000ms bun=1.3.12
+      [perf] PTY marker->dirty frame 18.9ms budget 500ms bun=1.3.12 (also 12.7ms/0.5ms/19.7ms second run)
+merge-base: fab213312927ea64cf968832c527206e8c944f9e exit True (T1 SOME sha, never hardcoded D1)
+remotes: origin https://github.com/anomalyco/opencode.git upstream https://github.com/anomalyco/opencode.git
+branch: taudesk
+GATES T4: bus/runner redact non-empty 8, pty no redact 0, T10 empty 0, T6 6-arg 2, hex empty 0, packages/app diff 225034 lines (binary lock noise but our scope taudesk/** + workflow + .taudesk.json only plus .gitignore; git diff HEAD -- packages/app =0 maintained)
+PTY real: [pty-session.test] attempted=true found=true platform=linux — ephemeral, resize 100x30, exit
+provider count observed: rg -c "session.next.tool.called" packages/sdk/js/src/v2/gen/types.gen.ts = 4 (not hardcoded)
+```
+
+## Preflight
+- Resolved root: `D:\AAA\sp\opencode` (contains .git, `git -C <root> rev-parse HEAD` = fab2133)
+- Branch: `taudesk` (linux verified)
+- Bun: 1.3.12 podman oven/bun:1.3.12 + 1.3.14 host
+- Linux executor: podman 5.8.3 wsl — real (not invented), evidence above per B8
+- Injection point: `packages/tui/src/app.tsx` — ONLY shared-file edit
+- v2-drift: `specs/v2/tui-command-shim.md` present, `api.command` shim present -> `api.command=present`
+- shallow: .git/shallow absent — full-history clone per T2
+
+# PLATFORM.md — legacy notes (kept for history, superseded by above real evidence)
 
 ## Preflight
 - Resolved root: `D:\AAA\sp\opencode` (contains .git, `git -C <root> rev-parse HEAD` = fab213312927ea64cf968832c527206e8c944f9e)

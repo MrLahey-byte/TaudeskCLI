@@ -86,6 +86,14 @@ import * as TuiAudio from "./audio"
 import { win32DisableProcessedInput, win32FlushInputBuffer } from "./terminal-win32"
 import { destroyRenderer } from "./util/renderer"
 import { cliErrorMessage, errorFormat } from "./util/error"
+import { TaudeskStateProvider, createTaudeskState } from "./taudesk/state"
+import { TaudeskLayout } from "./taudesk/layout"
+import { TaudeskPluginRegistry } from "./taudesk/plugin/registry"
+import { installProcessGuard } from "./taudesk/guard"
+import { bootstrapTaudesk } from "./taudesk/bootstrap"
+import { loadTaudeskConfig } from "./taudesk/config"
+import * as path from "node:path"
+import * as fs from "node:fs/promises"
 
 registerOpencodeSpinner()
 
@@ -1084,51 +1092,109 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
     return render({ params: route.data.data })
   })
 
-  return (
-    <box
-      width={dimensions().width}
-      height={dimensions().height}
-      flexDirection="column"
-      backgroundColor={theme.background}
-      onMouseDown={(evt) => {
-        if (!Flag.OPENCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT) return
-        if (evt.button !== MouseButton.RIGHT) return
+  // taudesk: bootstrap + guards (I/O allowlist), single shared-file edit injection point
+  const taudeskState = createTaudeskState()
+  const taudeskRegistry = new TaudeskPluginRegistry()
 
-        if (!Selection.copy(renderer, toast, clipboard)) return
-        evt.preventDefault()
-        evt.stopPropagation()
-      }}
-      onMouseUp={
-        !Flag.OPENCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT
-          ? () => Selection.copy(renderer, toast, clipboard)
-          : undefined
+  // Install guards idempotent at module init (B3)
+  try {
+    installProcessGuard(taudeskState.bus as never)
+  } catch {}
+
+  // Bootstrap config from process.cwd() (race-safe vs project.instance.directory())
+  const taudeskBootstrap = async () => {
+    try {
+      const io = {
+        cwd: () => process.cwd(),
+        exists: async (p: string) => {
+          try {
+            await fs.stat(p)
+            return true
+          } catch {
+            return false
+          }
+        },
+        join: (...parts: string[]) => path.join(...parts),
+        dirname: (p: string) => path.dirname(p),
+        read: (p: string) => fs.readFile(p, "utf8"),
       }
-    >
-      <Show when={Flag.OPENCODE_SHOW_TTFD}>
-        <TimeToFirstDraw />
-      </Show>
-      <Show when={ready()}>
-        <box flexGrow={1} minHeight={0} flexDirection="column">
-          <Switch>
-            <Match when={route.data.type === "home"}>
-              <Home />
-            </Match>
-            <Match when={route.data.type === "session"}>
-              <Show when={route.data.type === "session" ? route.data.sessionID : undefined} keyed>
-                {(_) => <Session />}
-              </Show>
-            </Match>
-          </Switch>
-          {plugin()}
-        </box>
-        <box flexShrink={0}>
-          <pluginRuntime.Slot name="app_bottom" />
-        </box>
-        <pluginRuntime.Slot name="app" />
-      </Show>
-      <Show when={!startup.skipInitialLoading}>
-        <StartupLoading ready={ready} />
-      </Show>
-    </box>
+      const cfg = await loadTaudeskConfig(process.cwd(), io as never)
+      taudeskState.setConfig(cfg)
+    } catch {}
+  }
+  // fire-and-forget bootstrap (view only)
+  void taudeskBootstrap()
+  void bootstrapTaudesk({
+    cwd: () => process.cwd(),
+    exists: async (p: string) => {
+      try {
+        await fs.stat(p)
+        return true
+      } catch {
+        return false
+      }
+    },
+    join: (...parts: string[]) => path.join(...parts),
+  }).then((res) => {
+    // publish instruction file discovery if needed
+    if (res.instructionFile) {
+      taudeskState.bus.publish("system", { kind: "instruction-file", path: res.instructionFile })
+    }
+  })
+
+  const appSwitchContent = (
+    <>
+      <box flexGrow={1} minHeight={0} flexDirection="column">
+        <Switch>
+          <Match when={route.data.type === "home"}>
+            <Home />
+          </Match>
+          <Match when={route.data.type === "session"}>
+            <Show when={route.data.type === "session" ? route.data.sessionID : undefined} keyed>
+              {(_) => <Session />}
+            </Show>
+          </Match>
+        </Switch>
+        {plugin()}
+      </box>
+      <box flexShrink={0}>
+        <pluginRuntime.Slot name="app_bottom" />
+      </box>
+      <pluginRuntime.Slot name="app" />
+    </>
+  )
+
+  return (
+    <TaudeskStateProvider state={taudeskState}>
+      <box
+        width={dimensions().width}
+        height={dimensions().height}
+        flexDirection="column"
+        backgroundColor={theme.background}
+        onMouseDown={(evt) => {
+          if (!Flag.OPENCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT) return
+          if (evt.button !== MouseButton.RIGHT) return
+
+          if (!Selection.copy(renderer, toast, clipboard)) return
+          evt.preventDefault()
+          evt.stopPropagation()
+        }}
+        onMouseUp={
+          !Flag.OPENCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT
+            ? () => Selection.copy(renderer, toast, clipboard)
+            : undefined
+        }
+      >
+        <Show when={Flag.OPENCODE_SHOW_TTFD}>
+          <TimeToFirstDraw />
+        </Show>
+        <Show when={ready()}>
+          <TaudeskLayout pluginRegistry={taudeskRegistry}>{appSwitchContent}</TaudeskLayout>
+        </Show>
+        <Show when={!startup.skipInitialLoading}>
+          <StartupLoading ready={ready} />
+        </Show>
+      </box>
+    </TaudeskStateProvider>
   )
 }

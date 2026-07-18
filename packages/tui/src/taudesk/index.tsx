@@ -26,5 +26,5 @@ export { installProcessGuard } from "./guard.ts";
 export { checkGateDirty, createGateWrapper, isTaskStart } from "./gate.ts";
 export { runVerifyCommand } from "./runner.ts";
 export { TaudeskLayout } from "./layout.tsx";
-export { PtyRenderable, PtyRenderableView } from "./pty/renderable.tsx";
+export { PtyRenderable } from "./pty/renderable.tsx";
 export { createPtySession } from "./pty/session.ts";

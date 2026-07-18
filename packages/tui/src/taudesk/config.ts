@@ -38,7 +38,6 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 
 function rejectTraversal(p: string): boolean {
   if (!p) return false;
-  // reject .. segments and absolute paths
   const normalized = p.replace(/\\/g, "/");
   if (normalized.startsWith("/") || /^[a-zA-Z]:\//.test(normalized)) return true;
   const parts = normalized.split("/");
@@ -46,18 +45,14 @@ function rejectTraversal(p: string): boolean {
 }
 
 export function parseTaudeskConfig(input: unknown): TaudeskConfig {
-  // Returns DEFAULT on error per spec; merge over DEFAULT
   if (!isPlainObject(input)) return structuredClone(DEFAULT_CONFIG);
-
   const out: TaudeskConfig = structuredClone(DEFAULT_CONFIG);
-
   if (isPlainObject(input.keybinds)) {
     for (const k of ["pane_switch", "pane_switch_reverse", "terminal_toggle"] as const) {
       const v = (input.keybinds as Record<string, unknown>)[k];
       if (typeof v === "string" && v.trim()) out.keybinds[k] = v.trim();
     }
   }
-
   if (isPlainObject(input.verify) && Array.isArray((input.verify as Record<string, unknown>).commands)) {
     const cmds = (input.verify as { commands: unknown[] }).commands;
     const valid: TaudeskVerifyCommand[] = [];
@@ -78,15 +73,11 @@ export function parseTaudeskConfig(input: unknown): TaudeskConfig {
       valid.push(obj);
     }
     out.verify.commands = valid;
-  } else if (Array.isArray((input as Record<string, unknown>).verify)) {
-    // allow legacy shape? no — keep default
   }
-
   const cm = (input as Record<string, unknown>).contextMode;
   if (cm === "auto" || cm === "hidden" || cm === "pinned") {
     out.contextMode = cm;
   }
-
   return out;
 }
 
@@ -98,58 +89,71 @@ export type ConfigIo = {
 };
 
 // Walks cwd -> git-root, precedence defaults < root-most < nearest,
-// within a dir taudesk.json < .taudesk.json. io injected. Init from process.cwd().
+// within a dir taudesk.json < .taudesk.json (dot file wins). io injected.
 export async function loadTaudeskConfig(dir: string, io: ConfigIo): Promise<TaudeskConfig> {
   let current = dir;
   const configs: TaudeskConfig[] = [];
   const visited = new Set<string>();
-  // naive walk up — stop at root (dirname==itself) or when .git found treated as git-root
+
+  // Collect per-dir with explicit tracking to avoid DEFAULT overwriting explicit values (contextMode bug)
+  type Tracked = TaudeskConfig & { _hasContextMode?: boolean };
+  const trackedConfigs: Tracked[] = [];
+
   for (let i = 0; i < 64; i++) {
     if (visited.has(current)) break;
     visited.add(current);
 
-    const candidates = [io.join(current, "taudesk.json"), io.join(current, ".taudesk.json")];
-    for (const candidate of candidates) {
+    let perDir: Tracked | null = null;
+
+    for (const candidate of [io.join(current, "taudesk.json"), io.join(current, ".taudesk.json")]) {
       try {
-        const exists = await io.exists(candidate);
-        if (!exists) continue;
-        const raw = await io.read(candidate);
-        const parsed = JSON.parse(raw);
-        configs.push(parseTaudeskConfig(parsed));
-      } catch {
-        // invalid json => treat as DEFAULT (error case)
-      }
+        if (!(await io.exists(candidate))) continue;
+        const rawStr = await io.read(candidate);
+        const rawObj = JSON.parse(rawStr) as Record<string, unknown>;
+        const parsed = parseTaudeskConfig(rawObj) as Tracked;
+        const hasContextMode = typeof rawObj.contextMode === "string" && ["auto", "hidden", "pinned"].includes(rawObj.contextMode as string);
+        parsed._hasContextMode = hasContextMode;
+
+        if (!perDir) {
+          perDir = parsed;
+        } else {
+          // within same dir dot (second) wins
+          if (parsed.keybinds.pane_switch !== DEFAULT_CONFIG.keybinds.pane_switch) perDir.keybinds.pane_switch = parsed.keybinds.pane_switch;
+          if (parsed.keybinds.pane_switch_reverse !== DEFAULT_CONFIG.keybinds.pane_switch_reverse) perDir.keybinds.pane_switch_reverse = parsed.keybinds.pane_switch_reverse;
+          if (parsed.keybinds.terminal_toggle !== DEFAULT_CONFIG.keybinds.terminal_toggle) perDir.keybinds.terminal_toggle = parsed.keybinds.terminal_toggle;
+          if (parsed.verify.commands.length > 0) perDir.verify.commands = parsed.verify.commands;
+          if (hasContextMode) {
+            perDir.contextMode = parsed.contextMode;
+            perDir._hasContextMode = true;
+          }
+        }
+      } catch {}
     }
+    if (perDir) trackedConfigs.push(perDir);
 
-    // detect git root via .git existence — stop after processing it
     try {
-      const gitMarker = io.join(current, ".git");
-      if (await io.exists(gitMarker)) {
-        break;
-      }
+      if (await io.exists(io.join(current, ".git"))) break;
     } catch {}
-
     const parent = io.dirname(current);
     if (parent === current) break;
     current = parent;
   }
 
-  // configs collected from leaf to root; we need root-most first, then nearest overrides.
-  configs.reverse();
-  // Merge in order: defaults already in each parsed (which started from DEFAULT), so we merge sequentially
-  let merged = structuredClone(DEFAULT_CONFIG);
-  for (const cfg of configs) {
-    // keybinds overwrite per key
+  trackedConfigs.reverse();
+
+  let merged = structuredClone(DEFAULT_CONFIG) as Tracked;
+  merged._hasContextMode = false;
+  for (const cfg of trackedConfigs) {
     if (cfg.keybinds.pane_switch !== DEFAULT_CONFIG.keybinds.pane_switch) merged.keybinds.pane_switch = cfg.keybinds.pane_switch;
-    if (cfg.keybinds.pane_switch_reverse !== DEFAULT_CONFIG.keybinds.pane_switch_reverse)
-      merged.keybinds.pane_switch_reverse = cfg.keybinds.pane_switch_reverse;
-    if (cfg.keybinds.terminal_toggle !== DEFAULT_CONFIG.keybinds.terminal_toggle)
-      merged.keybinds.terminal_toggle = cfg.keybinds.terminal_toggle;
-    // verify commands: replace entirely if present in file
-    if (cfg.verify.commands.length > 0) {
-      merged.verify.commands = cfg.verify.commands;
+    if (cfg.keybinds.pane_switch_reverse !== DEFAULT_CONFIG.keybinds.pane_switch_reverse) merged.keybinds.pane_switch_reverse = cfg.keybinds.pane_switch_reverse;
+    if (cfg.keybinds.terminal_toggle !== DEFAULT_CONFIG.keybinds.terminal_toggle) merged.keybinds.terminal_toggle = cfg.keybinds.terminal_toggle;
+    if (cfg.verify.commands.length > 0) merged.verify.commands = cfg.verify.commands;
+    const hasCtx = (cfg as Tracked)._hasContextMode ?? (cfg.contextMode !== undefined && cfg.contextMode !== DEFAULT_CONFIG.contextMode);
+    if (hasCtx && cfg.contextMode) {
+      merged.contextMode = cfg.contextMode;
+      merged._hasContextMode = true;
     }
-    if (cfg.contextMode) merged.contextMode = cfg.contextMode;
   }
+  delete (merged as { _hasContextMode?: boolean })._hasContextMode;
   return merged;
 }

@@ -1,8 +1,7 @@
-// pty/bun-backend.ts — bun-pty wrapper. Lazy-loaded per B5.
-// I/O allowlist: owns process.
+// pty/bun-backend.ts — bun-pty wrapper. Lazy-loaded per B5. Covers signatures seen in 0.4.8.
 
 export type BunPtyBackend = {
-  spawn: (opts: { cols: number; rows: number; cwd?: string; shell?: string; env?: Record<string, string> }) => BunPtyProc;
+  spawn: (opts: { cols: number; rows: number; cwd?: string; shell?: string; env?: Record<string, string> }) => any;
 };
 
 export type BunPtyProc = {
@@ -19,31 +18,10 @@ let cached: BunPtyBackend | null = null;
 export async function getBunPtyBackend(): Promise<BunPtyBackend | null> {
   if (cached) return cached;
   try {
-    // bun-pty 0.4.8 — lazy import
-    const mod = await import("bun-pty");
-    // @ts-ignore
-    const spawnFn = mod.spawn ?? mod.default?.spawn ?? mod.Terminal?.spawn;
+    const mod: any = await import("bun-pty");
+    const spawnFn = mod.spawn ?? mod.default?.spawn ?? mod.default ?? mod.Terminal?.spawn;
     if (!spawnFn) return null;
-    cached = {
-      spawn: (opts) => {
-        // wrap unknown shape
-        const proc = spawnFn({
-          cols: opts.cols,
-          rows: opts.rows,
-          cwd: opts.cwd,
-          shell: opts.shell,
-          env: opts.env,
-        }) as {
-          pid: number;
-          onData: (cb: (d: string) => void) => void;
-          onExit: (cb: (c: number) => void) => void;
-          write: (s: string) => void;
-          resize: (cols: number, rows: number) => void;
-          kill: () => void;
-        };
-        return proc as BunPtyProc;
-      },
-    };
+    cached = { spawn: (opts: { cols: number; rows: number; cwd?: string; shell?: string; env?: Record<string, string> }) => spawnFn(opts) } as any;
     return cached;
   } catch {
     return null;

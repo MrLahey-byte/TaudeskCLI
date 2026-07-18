@@ -46,7 +46,7 @@ export function SwitcherView() {
             <box
               flexDirection="row"
               gap={1}
-              backgroundColor={isActive() ? theme.selected : undefined}
+              backgroundColor={isActive() ? (theme as any).selected ?? (theme as any).backgroundElement : undefined}
               onMouseDown={() => route.navigate({ type: "session", sessionID: s.id })}
             >
               <text fg={isActive() ? "selectedListItemText" : "textMuted"}>{n}</text>

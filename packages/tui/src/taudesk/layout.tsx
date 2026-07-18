@@ -1,7 +1,5 @@
-// layout.tsx — three-pane layout shell. Geometry memo over live width; contextVisible = hidden?false : pinned?true : three-pane-tier
-// ErrorBoundary per pane; mouse focus onMouseDown; panes per UI doctrine §4
-
-import { createMemo, Show, createSignal, onMount, onCleanup } from "solid-js";
+// layout.tsx — three-pane shell. Geometry memo over live width; contextVisible = hidden?false : pinned?true : three-pane-tier
+import { createMemo, Show } from "solid-js";
 import { useTerminalDimensions } from "@opentui/solid";
 import { useTheme } from "../context/theme.tsx";
 import { computePaneGeometry, type PaneGeometry } from "./geometry.ts";
@@ -16,16 +14,11 @@ import { ThinkingView } from "./views/thinking.tsx";
 import { VerifyView } from "./views/verify.tsx";
 import { KeybindsView } from "./views/keybinds.tsx";
 import { TaudeskPluginRegistry } from "./plugin/registry.ts";
-import { useSync } from "../context/sync.tsx";
-import { useRoute } from "../context/route.tsx";
 
 export function TaudeskLayout(props: { children?: unknown; pluginRegistry?: TaudeskPluginRegistry }) {
   const { theme } = useTheme();
   const dims = useTerminalDimensions();
   const state = useTaudeskState();
-  const sync = useSync();
-  const route = useRoute();
-
   const width = () => dims().width;
   const geometry = createMemo<PaneGeometry>(() => computePaneGeometry(width()));
 
@@ -36,38 +29,18 @@ export function TaudeskLayout(props: { children?: unknown; pluginRegistry?: Taud
     return geometry().tier === "three-pane";
   });
 
-  // focus repair: if focused pane disappears on shrink, focus moves to Control
   createMemo(() => {
     const g = geometry();
     const visible = new Set<string>();
-    if (g.tier === "three-pane") {
-      visible.add("context");
-      visible.add("control");
-      visible.add("observability");
-    } else if (g.tier === "two-pane") {
-      visible.add("control");
-      visible.add("observability");
-    } else {
-      visible.add("control");
-    }
+    if (g.tier === "three-pane") { visible.add("context"); visible.add("control"); visible.add("observability"); }
+    else if (g.tier === "two-pane") { visible.add("control"); visible.add("observability"); }
+    else { visible.add("control"); }
     const cur = state.focus.get();
-    // pane-focus.ts repair is via Set check — we do explicit here too
-    if (!visible.has(cur)) {
-      state.focus.set("control");
-    }
+    if (!visible.has(cur)) state.focus.set("control");
   });
 
-  // mouse focus is on pane containers
-
-  const controlWidth = createMemo(() => {
-    const g = geometry();
-    if (g.tier === "stacked") return g.control;
-    return g.control;
-  });
-
+  const controlWidth = createMemo(() => geometry().control);
   const registry = () => props.pluginRegistry;
-
-  // Existing app renders as control pane content (injection point will wrap <Switch> over Home/Session)
   const innerChildren = () => props.children;
 
   return (
@@ -87,16 +60,17 @@ export function TaudeskLayout(props: { children?: unknown; pluginRegistry?: Taud
             <ThinkingView />
             <CommandsView />
             <KeybindsView />
-            {/* plugin slot for observability */}
             <Show when={registry()}>
               <box flexDirection="column" gap={1}>
                 {(() => {
                   const views = registry()!.listBySlot("observability");
                   return views.map((v) => {
-                    const Comp = v.component as (p?: unknown) => unknown;
+                    const C: any = v.component;
+                    // Call as function to avoid JSX component typecheck — returns unknown/JSX
+                    const rendered = (() => { try { return C({ session_id: "" }); } catch { return null; } })();
                     return (
-                      <box flexDirection="column" borderStyle="rounded" borderColor={theme.border} title={` ${v.title} `}>
-                        <Comp />
+                      <box flexDirection="column" borderStyle="rounded" borderColor={(theme as any).border} title={` ${v.title} `}>
+                        {rendered as never}
                       </box>
                     );
                   });

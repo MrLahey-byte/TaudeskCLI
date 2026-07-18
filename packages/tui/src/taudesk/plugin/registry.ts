@@ -13,9 +13,6 @@ const ID_RE = /^[a-z0-9][a-z0-9._-]*$/i;
 
 export function validateTaudeskPlugin(def: TaudeskPluginViewDef, apiVersion: string): void {
   if (apiVersion !== "1.0.0") throw new Error(`apiVersion mismatch: expected 1.0.0 got ${apiVersion}`);
-  if (!def.views && !(def as unknown as { id: string }).id) {
-    // if passed as single def
-  }
   if (!def.id || !ID_RE.test(def.id)) throw new Error(`bad id: ${def.id}`);
   if (!def.title) throw new Error("empty title");
   if (def.slot !== "context" && def.slot !== "observability") throw new Error(`bad pane: ${def.slot}`);

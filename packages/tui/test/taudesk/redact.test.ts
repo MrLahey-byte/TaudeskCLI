@@ -2,14 +2,13 @@ import { expect, test } from "bun:test";
 import { redactLine, redactText, redactValue, REDACTION_PATTERNS } from "../../src/taudesk/redact.ts";
 
 test("redaction uses .replace() only (T8) — patterns have /g", () => {
-  // verify patterns are global where needed
   expect(REDACTION_PATTERNS.awsAccessKey.flags).toContain("g");
 });
 
 test("redactLine replaces all 5 R1 patterns", () => {
   const cases = [
     { input: "key AKIAIOSFODNN7EXAMPLE1234 here", expectRedacted: true },
-    { input: "api: sk-abcdefghijklmnopqrst", inputHas: "api", expectRedacted: true },
+    { input: "api: ABCDEFGHIJKLMNOPQRSTUVWX and more", expectRedacted: true }, // 24 alnum, no hyphen (R1 /[A-Za-z0-9/+]{20,}/)
     { input: "postgres://user:pass@localhost/db", expectRedacted: true },
     { input: "-----BEGIN RSA PRIVATE KEY-----", expectRedacted: true },
     { input: "token ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA here", expectRedacted: true },
@@ -22,37 +21,34 @@ test("redactLine replaces all 5 R1 patterns", () => {
 });
 
 test("T8 repro: secrets at line START with trailing text longer than match — .test() misses but .replace() does not", () => {
-  // This repro places secrets at line start with trailing text longer than match — naive .test() on shared /g carries lastIndex
+  // MUST place secrets at line START with trailing text longer than match — naive repro false-passes because intervening non-matches reset lastIndex
+  // So we place two consecutive AKIA lines at start (no intervening reset) to guarantee lastIndex carryover miss
   const lines = [
     "AKIAIOSFODNN7EXAMPLE1234 is at start plus a lot of trailing text to exceed match length and expose lastIndex bug",
-    "postgres://bob:secret@host/db plus trailing text longer than the uri match itself to trigger lastIndex skip",
-    "normal line without secrets",
     "AKIAZZZZZZZZZZZZZZZZZZ at start again with long trailing text that ensures second occurrence would be missed by .test()",
+    "normal line without secrets",
+    "some more normal text",
   ];
   const combined = lines.join("\n");
 
-  // Simulate buggy .test() loop on shared /g
+  // Simulate buggy .test() loop on shared /g — consecutive secrets at start
   const shared = /AKIA[A-Z0-9]{16}/g;
   let missCount = 0;
   for (const line of lines) {
-    // Note: intervening non-matches reset lastIndex in some engines? The trap requires placement at line START
     if (line.startsWith("AKIA")) {
       const isMatch = shared.test(line);
       if (!isMatch) missCount++;
     } else {
-      // non-match does NOT necessarily reset — but in some impls it does; that's why secret-at-start matters
       shared.test(line);
     }
   }
-  // At least 1 miss via .test() — this proves the bug exists with .test() on shared /g
+  // At least 1 miss via .test() — proves bug
   expect(missCount).toBeGreaterThanOrEqual(1);
 
   // .replace() never misses
   const out = redactText(combined);
-  // Both AKIA lines must be redacted
   const redactedCount = (out.match(/\[REDACTED\]/g) || []).length;
   expect(redactedCount).toBeGreaterThanOrEqual(2);
-  // Output should have 0 misses
   expect(out).not.toContain("AKIAIOSFODNN7EXAMPLE1234");
   expect(out).not.toContain("AKIAZZZZZZZZZZZZZZZZZZ");
 });

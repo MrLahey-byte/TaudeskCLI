@@ -105,23 +105,22 @@ export function PtyTab(props: {
     try { screenHandle?.resize(c, r); } catch {}
   };
 
-  // key passthrough — pane-switch intercepts at 10000 above PTY passthrough, so terminal can never trap
+  // key passthrough — pane-switch intercepts at 10000 above PTY passthrough, so terminal can never trap (G14)
+  // Note: we only register intercept when focused, and we cast to any to satisfy opentui keymap overloads (priority ordering per R4)
   if (props.focused) {
-    const off = keymap.intercept(
+    const off = (keymap as any).intercept(
       "key",
       (evt: { key?: { name?: string; ctrl?: boolean; shift?: boolean; alt?: boolean; meta?: boolean; sequence?: string } }) => {
         const k = evt.key;
         if (!k) return;
-        // check if pane-switch combo — return false handled via shouldConsumeForPty early-return (G14)
         const consumed = shouldConsumeForPty(
           { name: k.name, sequence: k.sequence, ctrl: !!k.ctrl, shift: !!k.shift, alt: !!k.alt, meta: !!k.meta },
           {
-            isPaneSwitchCombo: (key) => {
-              // compare against config defaults — bus/handlers own actual check; here rely on TUI keymap dispatch ordering
-              const combos = [taudesk.config().keybinds.pane_switch, taudesk.config().keybinds.pane_switch_reverse];
-              // simple check: if ctrl+shift+] pressed
-              return (key.ctrl && key.shift && (key.name === "]" || key.sequence === "]")) ||
-                (key.ctrl && key.shift && (key.name === "[" || key.sequence === "[")) ;
+            isPaneSwitchCombo: (key): boolean => {
+              return !!(
+                (key.ctrl && key.shift && (key.name === "]" || key.sequence === "]")) ||
+                (key.ctrl && key.shift && (key.name === "[" || key.sequence === "["))
+              );
             },
             toBytes: (key) => keyToPtyBytes({ name: key.name, sequence: key.sequence, ctrl: key.ctrl, shift: key.shift, alt: key.alt, meta: key.meta } as never),
             write: (b: string) => {
@@ -130,12 +129,12 @@ export function PtyTab(props: {
           },
         );
         if (consumed) {
-          // prevent further bubbling already handled via write
+          // handled
         }
       },
       { priority: PRIORITIES.PTY_PASSTHROUGH },
     );
-    onCleanup(off);
+    onCleanup(off as never);
   }
 
   return (

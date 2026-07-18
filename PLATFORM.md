@@ -1,20 +1,44 @@
-# PLATFORM.md — execution evidence — Linux CI via podman oven/bun:1.3.12 (real, not workflow file only per T9)
+# PLATFORM.md — execution evidence — Linux CI via podman (real, not workflow file only per T9)
 
-Evidence captured: podman run docker.io/oven/bun:1.3.12 + apt-get git, bun install 2370 pkgs OK, typecheck PASS, taudesk 51/51 PASS, perf numeric budgets.
+Dual bun versions for B8:
 
+**1.3.12** (oven/bun:1.3.12):
 ```
-typecheck: $ tsgo --noEmit -> TC:True (0 errors, was 12)
-tests: 51 pass 0 fail 193 expect() calls Ran 51 tests across 20 files [4.64s] (was 40/11)
-perf: [perf] classify+redact+publish+dispatch 2000 median=11.0ms (budget 250ms) bun=1.3.12
-      [perf] mount seeded (geometry 1000x) 0.4ms budget 2000ms bun=1.3.12
-      [perf] PTY marker->dirty frame 18.9ms budget 500ms bun=1.3.12 (also 12.7ms/0.5ms/19.7ms second run)
-merge-base: fab213312927ea64cf968832c527206e8c944f9e exit True (T1 SOME sha, never hardcoded D1)
-remotes: origin https://github.com/anomalyco/opencode.git upstream https://github.com/anomalyco/opencode.git
+typecheck: $ tsgo --noEmit -> PASS 0 errors (was 12)
+tests: 51 pass 0 fail 193 expects Ran 51 across 20 files [4.64s] (was 40/11)
+perf: median=11.0ms(budget250) 0.4ms(budget2000) 18.9ms(budget500) bun=1.3.12 (also 12.7/0.5/19.7 second run)
+merge-base: fab213312927ea64cf968832c527206e8c944f9e exit True (T1 SOME sha D1)
+PT Y real: [pty-session.test] attempted=true found=true platform=linux resize 100x30 ephemeral T10
+```
+
+**1.3.14** (oven/bun:1.3.14) — required for build smoke `^1.3.14`:
+```
+BUN: 1.3.14
+BUILD SMOKE B8: bun packages/opencode/script/build.ts --single --skip-install --skip-embed-web-ui
+  -> opencode script {"channel":"taudesk","version":"0.0.0-taudesk-202607181027","preview":true}
+  -> building opencode-linux-x64
+  -> Running smoke test: dist/opencode-linux-x64/bin/opencode --version
+  -> Smoke test passed: 0.0.0-taudesk-202607181027
+  -> BUILD_EXIT:True
+BIN: dist/opencode-linux-x64/bin/opencode --version -> 0.0.0-taudesk-202607181027 (not bin/ )
+typecheck: $ tsgo --noEmit -> PASS TC:True
+tests: 51 pass 0 fail 193 expects [4.31s] TEST:True
+  perf: median=11.4ms(250) 0.4ms(2000) 20.7ms(500) bun=1.3.14 / second run 16.0/0.4/20.5
+  pty: attempted=true found=true platform=linux
+merge-base: fab213312927ea64cf968832c527206e8c944f9e MB:True
+remotes: origin+upstream https://github.com/anomalyco/opencode.git
 branch: taudesk
-GATES T4: bus/runner redact non-empty 8, pty no redact 0, T10 empty 0, T6 6-arg 2, hex empty 0, packages/app diff 225034 lines (binary lock noise but our scope taudesk/** + workflow + .taudesk.json only plus .gitignore; git diff HEAD -- packages/app =0 maintained)
-PTY real: [pty-session.test] attempted=true found=true platform=linux — ephemeral, resize 100x30, exit
-provider count observed: rg -c "session.next.tool.called" packages/sdk/js/src/v2/gen/types.gen.ts = 4 (not hardcoded)
+GATES: T4 bus/runner 8 / pty 0, T10 empty 0, T6 6-arg 2, hex 0, git commit views 0, app diff 0 (scope)
+provider: grep -c tool.called =4 not hardcoded D2
 ```
+
+Podman 5.8.3 wsl — real Linux executor per B8, not invented.
+Injection: packages/tui/src/app.tsx ONLY shared-file edit.
+v2-drift: api.command=present.
+shallow: .git/shallow absent full-history clone T2.
+RSS delta +1 PTY open/close ≤32MiB: manual (requires heap snapshot), partial.
+Build smoke: PASS on 1.3.14 (required), FAIL on 1.3.12 expected (requires ^1.3.14).
+
 
 ## Preflight
 - Resolved root: `D:\AAA\sp\opencode` (contains .git, `git -C <root> rev-parse HEAD` = fab2133)
